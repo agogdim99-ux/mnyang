@@ -28,9 +28,10 @@ const byId = id => FRIENDS.find(f => f.id === id) || FRIENDS[0];
 const josa = (word, a, b) => { const c = word.charCodeAt(word.length - 1) - 0xac00; return (c >= 0 && c % 28) ? a : b; };
 
 const MODES = {
-  easy:   { name: '쉬운 모드', speed: 4.4, gain: .045, gap: [1.35, 2.2], snack: .5,  goal: 30, pair: 0 },
-  normal: { name: '보통 모드', speed: 5.3, gain: .06,  gap: [1.0, 1.8],  snack: .34, goal: 45, pair: .1 },
-  hard:   { name: '하드 모드', speed: 6.3, gain: .075, gap: [.78, 1.45], snack: .22, goal: 60, pair: .25 },
+  // dirs: 장애물이 오는 방향별 확률 (front 앞, fall 하늘에서 떨어짐, swoop 대각선, back 뒤에서)
+  easy:   { name: '쉬운 모드', speed: 5.3, gain: .06, gap: [1.35, 2.2], snack: .5,  goal: 30, pair: 0,   dirs: { front: 1 } },
+  normal: { name: '보통 모드', speed: 5.3, gain: .06, gap: [1.1, 1.9],  snack: .34, goal: 45, pair: .1,  dirs: { front: .65, fall: .35 } },
+  hard:   { name: '하드 모드', speed: 6.3, gain: .075, gap: [.85, 1.5], snack: .22, goal: 60, pair: .2, dirs: { front: .4, fall: .22, swoop: .22, back: .16 } },
 };
 
 const S = {
@@ -515,9 +516,39 @@ function eatSnack(k) {
 }
 
 /* 장애물 종류: 아침 = 나뭇잎·벌레, 오후 = 빗방울, 밤 = 별똥별 */
-function newObstacle(x) {
+function pickDir() {
+  const d = MODES[R.mode].dirs; let r = Math.random();
+  for (const k in d) { r -= d[k]; if (r <= 0) return k; }
+  return 'front';
+}
+function newObstacle(x, dir = 'front') {
   const type = R.stage === 0 ? (Math.random() < .5 ? 'leaf' : 'bug') : R.stage === 1 ? 'rain' : 'meteor';
-  return { type, x, ph: rand(0, 6), t: 0, passed: false, hit: false, h: 0 };
+  const s = G.s, o = { type, dir, x, ph: rand(0, 6), t: 0, passed: false, hit: false, h: 0 };
+  if (dir === 'fall') { o.x = R.px + s * rand(4.5, 6.5); o.h = G.g + s; o.vh = (G.g + s) / .75; }
+  if (dir === 'swoop') { o.h = G.g * .85; o.h0 = o.h; o.goal = Math.random() < .5 ? s * .3 : s * 1.75; }
+  if (dir === 'back') { o.x = -s; o.delay = .9; }
+  return o;
+}
+/* 방향별 움직임 */
+function moveObs(o, dt, sp) {
+  const s = G.s;
+  o.t += dt;
+  if (o.dir === 'back') {
+    if (o.delay > 0) { o.delay -= dt; return; }
+    o.x += s * 3.4 * dt; o.h = obsHeight(o); return;
+  }
+  o.x -= sp * OBS_SPEED[o.type] * (o.dir === 'swoop' ? 1.15 : 1) * dt;
+  if (o.dir === 'fall') {
+    const base = obsHeight(o);
+    o.h -= o.vh * dt;
+    if (o.h <= base) { o.h = base; o.dir = 'front'; burst(o.x, G.g - o.h, ['#ffffff', '#e8f6d8'], 5, .4); }
+    return;
+  }
+  if (o.dir === 'swoop') {
+    const end = R.px + s * 3, k = clamp((o.x - end) / Math.max(1, G.w + s - end), 0, 1);
+    o.h = o.goal + (o.h0 - o.goal) * k * k; return;
+  }
+  o.h = obsHeight(o);
 }
 function obsHeight(o) {
   const s = G.s;
@@ -537,19 +568,21 @@ function updatePlay(dt) {
   }
   R.spawn -= dt;
   if (R.spawn <= 0) {
-    obs.push(newObstacle(G.w + s));
+    obs.push(newObstacle(G.w + s, pickDir()));
     if (Math.random() < m.pair) obs.push(newObstacle(G.w + s * 2.2));
     if (Math.random() < m.snack) snacks.push({ x: G.w + s * rand(2.6, 3.4), h: s * rand(1.7, 2.3), got: false });
     R.spawn = rand(m.gap[0], m.gap[1]) * Math.max(.7, 1 - R.score * .006);
   }
   const pcx = R.px + s * .1, pcy = G.g - R.y - s * .62, pr = s * .4;
   for (const o of obs) {
-    o.t += dt; o.x -= sp * OBS_SPEED[o.type] * dt; o.h = obsHeight(o);
+    moveObs(o, dt, sp);
+    if (o.delay > 0) continue;
     if (!o.hit && Math.hypot(o.x - pcx, G.g - o.h - pcy) < pr + s * .22) { if (hit(o.x, G.g - o.h)) o.hit = true; }
     if (R.state !== 'play') return;
-    if (!o.passed && !o.hit && o.x < R.px - s * .7) { o.passed = true; floatText(R.px, G.g - R.y - s * 1.7, '+1'); addScore(1); }
+    const passed = o.dir === 'back' ? o.x > R.px + s * .9 : o.x < R.px - s * .7;
+    if (!o.passed && !o.hit && passed) { o.passed = true; floatText(R.px, G.g - R.y - s * 1.7, '+1'); addScore(1); }
   }
-  obs = obs.filter(o => o.x > -s * 2);
+  obs = obs.filter(o => o.dir === 'back' ? o.x < G.w + s * 2 : o.x > -s * 2);
   for (const k of snacks) {
     k.x -= sp * dt;
     if (!k.got && Math.hypot(k.x - pcx, G.g - k.h - pcy) < s * .75) { k.got = true; eatSnack(k); }
@@ -573,7 +606,7 @@ function updateEnding(dt) {
   E.t += dt;
   // 공중에 있었다면 착지
   if (R.y > 0 || R.vy > 0) { R.vy -= s * 40 * dt; R.y += R.vy * dt; if (R.y <= 0) { R.y = 0; R.vy = 0; } }
-  for (const o of obs) { o.t += dt; o.x -= sp * OBS_SPEED[o.type] * dt; o.h = obsHeight(o); }
+  for (const o of obs) moveObs(o, dt, sp);
   for (const k of snacks) k.x -= sp * dt;
   const ownerX = () => E.houseX - s * 2.2;
   if (E.step === 'house') {
@@ -704,6 +737,11 @@ function drawProgress(c) {
   const px = x0 + w * p; c.fillStyle = S.friend.body; c.strokeStyle = '#5a4636'; c.lineWidth = 1.5; ell(c, px, y, 7, 7); c.fill(); c.stroke();
 }
 
+function warnBadge(c, x, y, s, text) {
+  c.fillStyle = '#e04660'; ell(c, x, y, s * .34, s * .34); c.fill();
+  c.fillStyle = '#fff'; c.font = `${Math.round(s * .3)}px Jua, sans-serif`; c.textAlign = 'center'; c.textBaseline = 'middle';
+  c.fillText(text, x, y + 1);
+}
 function drawGame() {
   const c = G.c; if (!c) return;
   const s = G.s;
@@ -714,12 +752,22 @@ function drawGame() {
   for (const k of snacks) { const bob = Math.sin(R.t * 4 + k.x * .01) * s * .08; drawSnack(c, k.x, G.g - k.h + bob, s * .3, S.friend.kind, Math.sin(R.t * 2) * .2); }
   for (const o of obs) {
     const x = o.x, y = G.g - o.h, r = s * .28;
+    if (o.delay > 0) { // 뒤에서 오는 장애물 예고
+      if (Math.sin(R.t * 18) > -.3) warnBadge(c, s * .55, G.g - s * .6, s, '뒤!');
+      continue;
+    }
+    if (o.dir === 'fall') { // 떨어질 자리 표시
+      const k = clamp(1 - o.h / G.g, .2, 1);
+      c.fillStyle = `rgba(224,70,96,${.25 * k})`; ell(c, x, G.g + 2, r * 1.4 * k + 4, r * .35 * k + 2); c.fill();
+    }
     c.globalAlpha = o.hit || R.end ? .4 : 1;
-    shadow(c, x, G.g, r * .9);
+    if (o.h < s * 1.2) shadow(c, x, G.g, r * .9);
+    if (o.dir === 'back') { c.save(); c.translate(x * 2, 0); c.scale(-1, 1); }
     if (o.type === 'meteor') drawMeteor(c, x, y, r, R.t);
     else if (o.type === 'rain') drawRain(c, x, y, r);
     else if (o.type === 'leaf') drawLeaf(c, x, y, r, o.t * 5 + o.ph);
     else drawBug(c, x, y, r * .85, o.t);
+    if (o.dir === 'back') c.restore();
     c.globalAlpha = 1;
   }
   // 친구와 주인
